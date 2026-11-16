@@ -250,4 +250,168 @@ def compare_products(data):
         size = required_text(data, 'reference_size', 80)
         fit = required_text(data, 'desired_fit', 160)
         reference_id = backend.musinsa_product_id(reference_url)
-        target_id =
+        target_id = backend.musinsa_product_id(target_url)
+        old = backend.fetch_product_from_url(reference_url)
+        reference = backend.build_reference_clothes(old, size, fit)
+        new = old if reference_id == target_id else backend.fetch_product_from_url(target_url)
+
+    normalized = backend.normalize_sizes(new['raw_sizes'])
+    if not any(row['status'] == 'ok' for row in normalized.values()):
+        raise ValueError('새 상품에 비교 가능한 실측표가 없습니다.')
+    rows = []
+    for name, entry in normalized.items():
+        measurements = entry['measurements']
+        gaps = {
+            field: round(measurements[field] - reference['measurements'][field], 1)
+            for field in FIELDS if measurements.get(field) is not None
+            and reference['measurements'].get(field) is not None
+        }
+        rows.append({'size': name, 'status': entry['status'], 'reason': entry['reason'],
+                     'measurements': measurements, 'gaps': gaps})
+    comparison_id = secrets.token_urlsafe(24)
+    now = time.monotonic()
+    with CACHE_LOCK:
+        for key in list(CACHE):
+            if now - CACHE[key]['created'] > CACHE_TTL:
+                CACHE.pop(key)
+        while len(CACHE) >= 64:
+            CACHE.pop(next(iter(CACHE)))
+        CACHE[comparison_id] = {'created': now, 'reference': reference, 'normalized': normalized, 'target_product': new}
+    return {'comparison_id': comparison_id, 'reference': {**public_product(old),
+            'size': reference['purchased_size'], 'measurements': reference['measurements']},
+            'target': public_product(new), 'desired_fit': fit, 'sizes': rows}
+
+
+def recommend_comparison(data):
+    comparison_id = required_text(data, 'comparison_id', 100)
+    api_key = (
+        data.get('api_key')
+        or os.environ.get('GEMINI_API_KEY')
+        or getattr(backend, 'GEMINI_API_KEY', '')
+    ).strip()
+    if not api_key:
+        raise RuntimeError('서버에 GEMINI_API_KEY가 설정되지 않았습니다. Render 환경변수를 확인해 주세요.')
+    with CACHE_LOCK:
+        stored = CACHE.get(comparison_id)
+        if stored is None or time.monotonic() - stored['created'] > CACHE_TTL:
+            CACHE.pop(comparison_id, None)
+            raise ValueError('비교 정보가 만료되었습니다. 치수 비교를 다시 실행해 주세요.')
+    try:
+        return backend.recommend_size(stored['reference'], stored['normalized'], api_key, stored.get('target_product'))
+    except (RuntimeError, ValueError) as exc:
+        raise RuntimeError(str(exc).replace(api_key, '[숨김]')) from None
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def send_body(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def send_json(self, code, data):
+        self.send_body(code, json.dumps(data, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
+
+    def is_external_https(self, hostname):
+        return hostname.endswith('.trycloudflare.com') or hostname.endswith('.onrender.com')
+
+    def valid_host(self):
+        hostname = self.headers.get('Host', '').split(':')[0]
+        return hostname in ('127.0.0.1', 'localhost') or self.is_external_https(hostname)
+
+    def do_GET(self):
+        if not self.valid_host():
+            return self.send_json(403, {'error': '허용되지 않은 접속 주소입니다.'})
+        path = urlsplit(self.path).path
+        if path == '/api/profile':
+            try:
+                return self.send_json(200, {'profile': load_profile()})
+            except RuntimeError as exc:
+                return self.send_json(500, {'error': str(exc)})
+        assets = {'/': ('index.html', 'text/html; charset=utf-8'),
+                  '/compare': ('compare.html', 'text/html; charset=utf-8'),
+                  '/onboarding.js': ('onboarding.js', 'text/javascript; charset=utf-8'),
+                  '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+                  '/style.css': ('style.css', 'text/css; charset=utf-8')}
+        if path not in assets:
+            return self.send_json(404, {'error': '페이지를 찾지 못했습니다.'})
+        name, content_type = assets[path]
+        body = (ROOT / 'web' / name).read_bytes()
+        if name.endswith('.html'):
+            body = body.replace(b'__CSRF_TOKEN__', CSRF_TOKEN.encode())
+        self.send_body(200, body, content_type)
+
+    def do_POST(self):
+        origin = self.headers.get('Origin')
+        host = self.headers.get('Host', '')
+        hostname = host.split(':')[0]
+        scheme = 'https' if self.is_external_https(hostname) else 'http'
+        expected = f'{scheme}://{host}'
+        if (not self.valid_host() or (origin is not None and origin != expected)
+                or not secrets.compare_digest(self.headers.get('X-Page-Token', ''), CSRF_TOKEN)):
+            return self.send_json(403, {'error': '페이지를 새로고침한 뒤 다시 시도해 주세요.'})
+        if self.headers.get_content_type() != 'application/json':
+            return self.send_json(415, {'error': 'JSON 요청이 필요합니다.'})
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+            if not 0 < length <= 16384:
+                return self.send_json(413, {'error': '입력 크기가 너무 큽니다.'})
+            self.connection.settimeout(15)
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError('입력 형식을 확인해 주세요.')
+            if self.path == '/api/profile':
+                result = {'profile': save_profile(data)}
+            elif self.path == '/api/product':
+                result = backend.fetch_product_from_url(required_text(data, 'url'))
+            elif self.path == '/api/compare':
+                result = compare_products(data)
+            elif self.path == '/api/recommend':
+                result = recommend_comparison(data)
+            else:
+                return self.send_json(404, {'error': '요청 경로를 찾지 못했습니다.'})
+            self.send_json(200, result)
+        except (ValueError, UnicodeError) as exc:
+            self.send_json(400, {'error': str(exc)})
+        except backend.ProductRateLimitError as exc:
+            self.send_json(429, {'error': str(exc), 'retry_after': exc.retry_after})
+        except RuntimeError as exc:
+            self.send_json(502, {'error': str(exc)})
+        except Exception:
+            self.send_json(500, {'error': '처리 중 문제가 생겼습니다. 입력을 확인한 뒤 다시 시도해 주세요.'})
+
+
+def main():
+    default_port = int(os.environ.get('PORT', '8000'))
+    default_host = '0.0.0.0' if 'PORT' in os.environ else '127.0.0.1'
+    parser = argparse.ArgumentParser(description='사이즈 비교 웹사이트')
+    parser.add_argument('--port', type=int, default=default_port)
+    parser.add_argument('--host', default=default_host)
+    args = parser.parse_args()
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError:
+        raise SystemExit(f'포트({args.port})를 사용할 수 없습니다.')
+    print(f'웹사이트: http://{args.host}:{server.server_port}', flush=True)
+    print('종료: Ctrl+C', flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == '__main__':
+    main()
