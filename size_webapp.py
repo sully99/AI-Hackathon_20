@@ -22,10 +22,8 @@ CACHE = {}
 CACHE_LOCK = threading.Lock()
 CACHE_TTL = 15 * 60
 FIELDS = ['length_cm', 'shoulder_cm', 'chest_width_cm', 'sleeve_cm']
-PROFILE_PATH = ROOT / 'data' / 'fit_profile.json'
-PROFILE_LOCK = threading.Lock()
 
-# 대표 브랜드 & 무신사 스탠다드 최다 판매 상의 7종 S/M/L 실측표 기준 데이터
+# 대표 브랜드 & 무신사 스탠다드 최다 판매 상의 8종 S/M/L 실측표 기준 데이터
 BRAND_PRESETS = {
     "musinsa_relax_tee": {
         "product": {
@@ -142,20 +140,8 @@ BRAND_PRESETS = {
 }
 
 
-def load_profile():
-    with PROFILE_LOCK:
-        if not PROFILE_PATH.exists():
-            return None
-        try:
-            profile = json.loads(PROFILE_PATH.read_text(encoding='utf-8'))
-            if profile['version'] != 1 or not (1 <= len(profile['clothes']) <= 3):
-                raise ValueError()
-            return profile
-        except (ValueError, KeyError, TypeError):
-            raise RuntimeError('저장한 옷 정보를 읽지 못했습니다. 첫 화면에서 다시 등록해 주세요.') from None
-
-
-def save_profile(data):
+def build_user_profile(data):
+    """사용자 브라우저(localStorage)에 저장할 개인별 기준 옷 프로필을 생성합니다."""
     preset_brand = data.get('preset_brand')
     preset_size = data.get('preset_size')
 
@@ -190,22 +176,29 @@ def save_profile(data):
                 raise
             except (ValueError, RuntimeError) as exc:
                 raise ValueError(f'{index}번째 옷: {exc}') from None
-            clothes.append({'product': product, 'size': ref['purchased_size'], 'measurements': ref['measurements']})
+            clothes.append({
+                'product': public_product(product),
+                'size': ref['purchased_size'],
+                'measurements': ref['measurements'],
+            })
 
     traits = {}
     for field in FIELDS:
         values = [x['measurements'][field] for x in clothes if x['measurements'].get(field) is not None]
         if values:
-            traits[field] = {'min': min(values), 'max': max(values), 'average': round(sum(values) / len(values), 1), 'count': len(values)}
-    profile = {'version': 1, 'saved_at': datetime.now().astimezone().isoformat(timespec='seconds'),
-               'clothes': clothes, 'measurement_preferences': traits,
-               'note': '잘 맞았던 옷의 실측 범위입니다. 신체 치수나 체형을 뜻하지 않습니다.'}
-    with PROFILE_LOCK:
-        PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temporary = PROFILE_PATH.with_suffix('.tmp')
-        temporary.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding='utf-8')
-        temporary.replace(PROFILE_PATH)
-    return profile
+            traits[field] = {
+                'min': min(values),
+                'max': max(values),
+                'average': round(sum(values) / len(values), 1),
+                'count': len(values),
+            }
+    return {
+        'version': 1,
+        'saved_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+        'clothes': clothes,
+        'measurement_preferences': traits,
+        'note': '잘 맞았던 옷의 실측 범위입니다. 신체 치수나 체형을 뜻하지 않습니다.',
+    }
 
 
 def required_text(data, key, maximum=2048):
@@ -222,38 +215,27 @@ def public_product(product):
 
 
 def compare_products(data):
-    if 'profile_index' in data:
-        profile = load_profile()
-        index = data['profile_index']
-        if not profile or type(index) is not int or not (0 <= index < len(profile['clothes'])):
-            raise ValueError('첫 화면에서 잘 맞았던 옷을 먼저 등록해 주세요.')
-        saved = profile['clothes'][index]
-        reference_url = saved['product']['source_url']
-        target_url = required_text(data, 'target_url')
-        fit = required_text(data, 'desired_fit', 160)
-        target_id = backend.musinsa_product_id(target_url)
-        old = saved['product']
-        reference = {
-            'reference_url': reference_url,
-            'product_name': old['product_name'],
-            'purchased_size': saved['size'],
-            'fit_satisfaction': '잘 맞음',
-            'material': old.get('material'),
-            'stretch': old.get('stretch'),
-            'desired_fit': fit,
-            'measurements': dict(saved['measurements']),
-        }
-        new = backend.fetch_product_from_url(target_url)
-    else:
-        reference_url = required_text(data, 'reference_url')
-        target_url = required_text(data, 'target_url')
-        size = required_text(data, 'reference_size', 80)
-        fit = required_text(data, 'desired_fit', 160)
-        reference_id = backend.musinsa_product_id(reference_url)
-        target_id = backend.musinsa_product_id(target_url)
-        old = backend.fetch_product_from_url(reference_url)
-        reference = backend.build_reference_clothes(old, size, fit)
-        new = old if reference_id == target_id else backend.fetch_product_from_url(target_url)
+    saved = data.get('reference_clothes')
+    if not isinstance(saved, dict) or not isinstance(saved.get('measurements'), dict):
+        raise ValueError('첫 화면에서 잘 맞았던 옷을 먼저 등록해 주세요.')
+
+    target_url = required_text(data, 'target_url')
+    fit = required_text(data, 'desired_fit', 160)
+    backend.musinsa_product_id(target_url)
+
+    old = saved.get('product') or {}
+    reference_url = old.get('source_url') or 'https://www.musinsa.com/products/1032469'
+    reference = {
+        'reference_url': reference_url,
+        'product_name': old.get('product_name') or '기준 옷',
+        'purchased_size': str(saved.get('size') or 'M'),
+        'fit_satisfaction': '잘 맞음',
+        'material': old.get('material'),
+        'stretch': old.get('stretch'),
+        'desired_fit': fit,
+        'measurements': dict(saved['measurements']),
+    }
+    new = backend.fetch_product_from_url(target_url)
 
     normalized = backend.normalize_sizes(new['raw_sizes'])
     if not any(row['status'] == 'ok' for row in normalized.values()):
@@ -277,9 +259,13 @@ def compare_products(data):
         while len(CACHE) >= 64:
             CACHE.pop(next(iter(CACHE)))
         CACHE[comparison_id] = {'created': now, 'reference': reference, 'normalized': normalized, 'target_product': new}
-    return {'comparison_id': comparison_id, 'reference': {**public_product(old),
-            'size': reference['purchased_size'], 'measurements': reference['measurements']},
-            'target': public_product(new), 'desired_fit': fit, 'sizes': rows}
+    return {
+        'comparison_id': comparison_id,
+        'reference': {**public_product(old), 'size': reference['purchased_size'], 'measurements': reference['measurements']},
+        'target': public_product(new),
+        'desired_fit': fit,
+        'sizes': rows,
+    }
 
 
 def recommend_comparison(data):
@@ -334,11 +320,6 @@ class Handler(BaseHTTPRequestHandler):
         if not self.valid_host():
             return self.send_json(403, {'error': '허용되지 않은 접속 주소입니다.'})
         path = urlsplit(self.path).path
-        if path == '/api/profile':
-            try:
-                return self.send_json(200, {'profile': load_profile()})
-            except RuntimeError as exc:
-                return self.send_json(500, {'error': str(exc)})
         assets = {'/': ('index.html', 'text/html; charset=utf-8'),
                   '/compare': ('compare.html', 'text/html; charset=utf-8'),
                   '/onboarding.js': ('onboarding.js', 'text/javascript; charset=utf-8'),
@@ -365,14 +346,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(415, {'error': 'JSON 요청이 필요합니다.'})
         try:
             length = int(self.headers.get('Content-Length', '0'))
-            if not 0 < length <= 16384:
+            if not 0 < length <= 32768:
                 return self.send_json(413, {'error': '입력 크기가 너무 큽니다.'})
             self.connection.settimeout(15)
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict):
                 raise ValueError('입력 형식을 확인해 주세요.')
             if self.path == '/api/profile':
-                result = {'profile': save_profile(data)}
+                result = {'profile': build_user_profile(data)}
             elif self.path == '/api/product':
                 result = backend.fetch_product_from_url(required_text(data, 'url'))
             elif self.path == '/api/compare':
