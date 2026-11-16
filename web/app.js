@@ -1,3 +1,4 @@
+const STORAGE_KEY = 'fitnote_profile_v1';
 const form = document.querySelector('#compare-form');
 const errorBox = document.querySelector('#error');
 const statusBox = document.querySelector('#status');
@@ -9,6 +10,7 @@ const fields = ['length_cm', 'shoulder_cm', 'chest_width_cm', 'sleeve_cm'];
 let comparison = null;
 let busy = false;
 let blockedUntil = 0;
+let myProfile = null;
 
 function element(name, text, className) {
   const el = document.createElement(name);
@@ -26,6 +28,18 @@ function setBusy(value) {
 function showError(message) {
   errorBox.textContent = message;
   errorBox.hidden = false;
+}
+
+function readLocalProfile() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.clothes) || !parsed.clothes.length) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 async function api(path, body) {
@@ -136,13 +150,17 @@ async function requestRecommendation() {
 
 async function submit() {
   if (busy || !form.reportValidity()) return;
+  if (!myProfile?.clothes?.length) {
+    window.location.replace('/');
+    return;
+  }
   if (Date.now() < blockedUntil) {
     showError(`무신사 요청 제한 대기 중입니다. ${Math.ceil((blockedUntil - Date.now()) / 1000)}초 후 다시 시도해 주세요.`);
     return;
   }
   errorBox.hidden = true;
   const body = Object.fromEntries(new FormData(form));
-  body.profile_index = 0;
+  body.reference_clothes = myProfile.clothes[0];
   setBusy(true);
   comparison = null;
   retry.hidden = true;
@@ -189,20 +207,14 @@ form.addEventListener('input', () => {
   statusBox.textContent = '입력이 바뀌었어요. 다시 비교해 주세요.';
 });
 
-async function loadSavedReferences() {
-  setBusy(true);
-  try {
-    const response = await fetch('/api/profile');
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error);
-    if (!data.profile) {
-      window.location.replace('/');
-      return;
-    }
-    setBusy(false);
-  } catch (error) {
-    showError(error.message || '저장한 옷을 불러오지 못했어요. 첫 화면에서 다시 등록해 주세요.');
+function loadSavedReferences() {
+  myProfile = readLocalProfile();
+  if (!myProfile) {
+    window.location.replace('/');
+    return;
   }
+  const ref = myProfile.clothes[0];
+  statusBox.textContent = `기준 옷: ${ref.product?.product_name || '등록한 옷'} (${ref.size})`;
 }
 
 loadSavedReferences();
