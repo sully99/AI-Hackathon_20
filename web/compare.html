@@ -18,11 +18,7 @@
             <label for="target-url">상품 URL</label><input id="target-url" name="target_url" type="url" placeholder="https://www.musinsa.com/products/..." required maxlength="2048">
             <label for="desired-fit">원하는 핏</label><input id="desired-fit" name="desired_fit" value="기준 옷과 비슷한 핏" placeholder="예: 조금 더 여유로운 핏" required maxlength="160">
           </fieldset>
-          <fieldset class="api-field"><legend><span class="number">02</span>AI 추천 <span class="optional">선택</span></legend>
-            <label for="api-key">Gemini API 키</label><input id="api-key" name="api_key" type="password" placeholder="AI 추천을 받을 때만 입력" autocomplete="off" maxlength="1024" spellcheck="false">
-            <p class="hint">입력한 키는 파일이나 브라우저 저장소에 저장하지 않아요.</p>
-          </fieldset>
-          <div class="actions"><button class="primary" type="submit" id="recommend-button">내 사이즈 추천받기 <span aria-hidden="true">↗</span></button><button class="secondary" type="button" id="compare-button">키 없이 치수만 비교</button></div>
+          <div class="actions"><button class="primary" type="submit" id="recommend-button">내 사이즈 추천받기 <span aria-hidden="true">↗</span></button></div>
           <p id="status" class="status" role="status" aria-live="polite"></p>
           <p id="error" class="error" role="alert" hidden></p>
         </form>
@@ -36,7 +32,7 @@
           <div class="table-scroll"><table><caption class="sr-only">새 옷 사이즈별 실측 및 저장된 기준과의 차이</caption><thead><tr><th scope="col">사이즈</th><th scope="col">총장</th><th scope="col">어깨</th><th scope="col">가슴단면</th><th scope="col">소매</th></tr></thead><tbody id="size-rows"></tbody></table></div>
           <p class="hint table-note">큰 숫자는 실측, 아래 숫자는 잘 맞던 옷과의 차이예요.</p>
           <div id="recommendation" class="recommendation" aria-live="polite"></div>
-          <button type="button" class="secondary retry" id="retry-button" hidden>현재 비교로 AI 추천 다시 받기</button>
+          <button type="button" class="secondary retry" id="retry-button" hidden>AI 추천 다시 받기</button>
           <p class="disclaimer">같은 치수라도 소재와 디자인에 따라 착용감이 달라질 수 있어요. 구매 전 상품의 측정 안내도 확인해 주세요.</p>
         </div>
       </section>
