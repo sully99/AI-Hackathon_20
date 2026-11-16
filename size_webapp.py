@@ -214,7 +214,13 @@ def compare_products(data):
 
 def recommend_comparison(data):
     comparison_id = required_text(data, 'comparison_id', 100)
-    api_key = required_text(data, 'api_key', 1024)
+    api_key = (
+        data.get('api_key')
+        or os.environ.get('GEMINI_API_KEY')
+        or getattr(backend, 'GEMINI_API_KEY', '')
+    ).strip()
+    if not api_key:
+        raise RuntimeError('서버에 GEMINI_API_KEY가 설정되지 않았습니다. Render 환경변수를 확인해 주세요.')
     with CACHE_LOCK:
         stored = CACHE.get(comparison_id)
         if stored is None or time.monotonic() - stored['created'] > CACHE_TTL:
